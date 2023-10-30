@@ -11,5 +11,4 @@ It should be noted that the results obtained may vary slightly depending on the 
 
 Usage  
 =
-To obtain the results, simply run the main.py file as the dataset is in h5 format.  
-By replacing "filename", you can obtain clustering metrics for different datasets.
+To obtain the results, simply run the "main.py" file as the dataset is in h5 format. The final output reports the clustering performance. By replacing "filename", you can obtain clustering metrics for different datasets.
