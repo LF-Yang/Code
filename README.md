@@ -5,4 +5,4 @@ It should be noted that the results obtained may vary slightly depending on the 
 
 To obtain the results, simply run the main.py file as the dataset is in h5 format.
 
-![](https://github.com/LF-Yang/Code/Framework.png)
+![](https://github.com/LF-Yang/Code/blob/master/Framework.png)
