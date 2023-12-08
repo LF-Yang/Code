@@ -1,16 +1,13 @@
-import torch
 import torch.nn as nn
 from torch.autograd import Variable
 from torch.nn import Parameter
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from Layers import ZINBLoss, MeanAct, DispAct
-import numpy as np
 from sklearn.cluster import KMeans
-import math
 import os
 from sklearn import metrics
-from Generate import cluster_acc,pairwise_select
+from Generate import *
 
 def buildNetwork(layers, activation="relu"):
     net = []
@@ -23,17 +20,17 @@ def buildNetwork(layers, activation="relu"):
     return nn.Sequential(*net)
 
 class scNetwork(nn.Module):
-    def __init__(self, input_dim, z_dim,
-                 encodeLayer=[], decodeLayer=[],
-                 activation="relu",
-                 sigma=1., alpha=1., gamma=1.,
-                 device="cuda"):
+    def __init__(self, input_dim, z_dim,encodeLayer=[], decodeLayer=[],activation="relu",
+                 sigma=1., alpha=1., gamma1=1.,gamma2=1.,gamma3=1.,gamma4=1.,device="cuda"):
         super(scNetwork, self).__init__()
         self.z_dim = z_dim
         self.activation = activation
         self.sigma = sigma
         self.alpha = alpha
-        self.gamma = gamma
+        self.gamma1 = gamma1
+        self.gamma2 = gamma2
+        self.gamma3 = gamma3
+        self.gamma4 = gamma4
         self.device = device
         self.encoder = buildNetwork([input_dim]+encodeLayer, activation=activation)
         self.decoder = buildNetwork([z_dim]+decodeLayer, activation=activation)
@@ -44,10 +41,8 @@ class scNetwork(nn.Module):
 
         self.zinb_loss = ZINBLoss().to(self.device)
         self.to(device)
-    
     def save_model(self, path):
         torch.save(self.state_dict(), path)
-
     def load_model(self, path):
         pretrained_dict = torch.load(path, map_location=lambda storage, loc: storage)
         model_dict = self.state_dict()
@@ -109,7 +104,6 @@ class scNetwork(nn.Module):
             return torch.mean(torch.sum(target*torch.log(target/(pred+1e-6)), dim=-1))
         kldloss = kld(p, q)
         return kldloss
-
     def triplet_loss(self, anchor, positive, negative, margin_constant):
         # loss = max(d(anchor, negative) - d(anchor, positve) + margin, 0), margin > 0
         # d(x, y) = q(x) * q(y)
@@ -120,7 +114,6 @@ class scNetwork(nn.Module):
         penalty = diff_dis + margin
         triplet_loss = 1*torch.max(penalty, torch.zeros(negative_dis.shape).cuda())
         return torch.mean(triplet_loss)
-
     def weighted_cross_entropy_loss(self,y_true, y_prob,yratio):
         n_classes =y_prob.shape[1]#the number of type
         class_counts = torch.bincount(y_true, minlength=n_classes)# celltype proportions and normalize
@@ -131,19 +124,18 @@ class scNetwork(nn.Module):
         wce_loss = -torch.mean(torch.sum(w * y_onehot * torch.log(y_prob), dim=1))
         return wce_loss
     def  pairwise_contrastive_loss(self,y_true, y_prob):
-        norms_p = torch.norm(y_prob, dim=1, keepdim=True, p=1.5)
+        norms_p = torch.norm(y_prob, dim=1, keepdim=True, p=2)
         unit_p=y_prob/norms_p
         unit_p_T=torch.transpose(unit_p,0,1)
         S=torch.matmul(unit_p,unit_p_T)#similarity matrix
         n_samples = y_true.shape[0]# the number of cell
         R = (y_true.unsqueeze(0) == y_true.unsqueeze(1)).int()
-        epsilon = 5e-6
+        epsilon = 1e-6
         S = torch.clamp(S, epsilon, 1 - epsilon)
         pwc_loss= -1/n_samples/n_samples*(torch.sum(R * torch.log(S) + (1 - R) * torch.log(1 - S)))
         return pwc_loss
 
-    def pretrain_autoencoder(self, X, X_raw, size_factor,
-                             batch_size=256, lr=0.001, epochs=400,
+    def pretrain_autoencoder(self, X, X_raw, size_factor,batch_size=256, lr=0.001, epochs=100,
                              ae_save=True, ae_weights='AE_weights.pth.tar'):
         self.train()
         dataset = TensorDataset(torch.Tensor(X), torch.Tensor(X_raw), torch.Tensor(size_factor))
@@ -173,7 +165,7 @@ class scNetwork(nn.Module):
         newfilename = os.path.join(filename, 'FTcheckpoint_%d.pth.tar' % index)
         torch.save(state, newfilename)
 
-    def fit(self, X, X_raw, size_factor, n_clusters,anchor, positive, negative,
+    def fit(self, X, X_raw, size_factor, n_clusters, generate, margin, ratio,
             init_centroid=None, y=None, y_pred_init=None,lr=1., batch_size=256,
             num_epochs=10, update_interval=1, tol=1e-3, save_dir=""):
         self.train()
@@ -182,9 +174,9 @@ class scNetwork(nn.Module):
         X_raw = torch.tensor(X_raw, dtype=torch.float)
         size_factor = torch.tensor(size_factor, dtype=torch.float)
         self.mu = Parameter(torch.Tensor(n_clusters, self.z_dim).to(self.device))
-        optimizer = optim.Adadelta(filter(lambda p: p.requires_grad, self.parameters()), lr=lr, rho=.85)
+        optimizer = optim.Adadelta(filter(lambda p: p.requires_grad, self.parameters()), lr=lr, rho=.9)
 
-        print("Initializing cluster centers with Soft-Kmeans.")
+        print("Initializing cluster centers with Soft-Kmeans:")
         if init_centroid is None:
             kmeans = KMeans(n_clusters, init='k-means++')
             data = self.encodeBatch(X)# Encode the input sample
@@ -195,14 +187,11 @@ class scNetwork(nn.Module):
             self.mu.data.copy_(torch.tensor(init_centroid, dtype=torch.float))
             self.y_pred = y_pred_init# Returns the predict label
             self.y_pred_last = self.y_pred
-        print('Initializing soft-Kmeans: ' )
 
         num = X.shape[0]#the number of clusters
         num_batch = int(math.ceil(1.0*X.shape[0]/batch_size))#sub cluster batches
-        tri_num = anchor.shape[0]  # the number of triple
-        tri_num_batch = int(math.ceil(1.0 * anchor.shape[0] / batch_size))  # sub triple batches
 
-        final_acc, final_nmi, final_ari, final_epoch , final_ami= 0, 0, 0, 0,0
+        final_acc, final_nmi, final_ari,  final_ami= 0, 0, 0, 0
         loss_history = []
         for epoch in range(num_epochs):
             if epoch > 0:
@@ -215,36 +204,33 @@ class scNetwork(nn.Module):
 
                 final_acc = acc = np.round(cluster_acc(y, self.y_pred), 5)
                 final_nmi = nmi = np.round(metrics.normalized_mutual_info_score(y, self.y_pred), 5)
-                final_epoch = ari = np.round(metrics.adjusted_rand_score(y, self.y_pred), 5)
+                final_ari = ari = np.round(metrics.adjusted_rand_score(y, self.y_pred), 5)
                 final_ami = ami = np.round(metrics.adjusted_mutual_info_score(y, self.y_pred), 5)
                 print('\t\tClustering %d: NMI= %.4f, ARI= %.4f,ACC= %.4f,AMI= %.4f' % (epoch, nmi, ari, acc,ami))
 
                 delta_label = np.sum(self.y_pred != self.y_pred_last).astype(np.float) / num
-                if (epoch > 0 and delta_label < tol) or epoch%10 == 0:# save current model
-                    self.save_checkpoint({'epoch': epoch+1,
-                            'state_dict': self.state_dict(),
-                            'mu': self.mu,
-                            'y_pred': self.y_pred,
-                            'y_pred_last': self.y_pred_last,
-                            'y': y
-                            }, epoch+1, filename=save_dir)
+                if (epoch > 0 and delta_label < tol) or epoch%25 == 0:# save current model
+                    self.save_checkpoint({
+                        'epoch': epoch+1,
+                        'state_dict': self.state_dict(),
+                        'mu': self.mu,
+                        'y_pred': self.y_pred,
+                        'y_pred_last': self.y_pred_last,
+                        'y': y}, epoch+1, filename=save_dir)
 
                 self.y_pred_last = self.y_pred
                 if epoch>0:
-                    # print("loss_history",loss_history)
                     if delta_label < tol: #check stop criterion
                         print('delta_label ', delta_label, '< tol ', tol)
                         print("Reach tolerance threshold. Stopping training.")
                         break
                     elif epoch > 5:
-                        # print(np.mean(abs(np.diff(loss_history[-6:]))))
-                        if np.mean(abs(np.diff(loss_history[-6:]))) < tol:
+                        if np.mean(abs(np.diff(loss_history[-6:]))) < tol*5:
                             print("Reach tolerance threshold. Stopping running.")
                             break
 
             # train 1 epoch for clustering loss
-            zinb_loss_val = 0.0
-            cluster_loss_val = 0.0
+            zinb_loss_val = cluster_loss_val = 0.0
             for batch_idx in range(num_batch):
                 xbatch = X[batch_idx*batch_size : min((batch_idx+1)*batch_size, num)]
                 xrawbatch = X_raw[batch_idx*batch_size : min((batch_idx+1)*batch_size, num)]
@@ -255,81 +241,68 @@ class scNetwork(nn.Module):
                 rawinputs = Variable(xrawbatch).to(self.device)
                 sfinputs = Variable(sfbatch).to(self.device)
                 target = Variable(pbatch).to(self.device)
-                zbatch, qbatch, meanbatch, dispbatch, pibatch = self.forward(inputs)
+                _, qbatch, meanbatch, dispbatch, pibatch = self.forward(inputs)
                 cluster_loss = self.cluster_loss(target, qbatch)
                 zinb_loss = self.zinb_loss(rawinputs, meanbatch, dispbatch, pibatch, sfinputs)
-                loss = cluster_loss*self.gamma + zinb_loss
-                loss.backward()
+                loss1 = cluster_loss*self.gamma1 + zinb_loss
+                loss1.backward()
                 optimizer.step()
-                cluster_loss_val += cluster_loss.item() * len(inputs)
-                zinb_loss_val += zinb_loss.item() * len(inputs)
+                cluster_loss_val += cluster_loss * len(inputs)
+                zinb_loss_val += zinb_loss * len(inputs)
+
+            # Semi
+            X_sub, y_sub , p_sub = cell_select(X, y, p,ratio)
+            anchor, positive, negative = generate_triplets(y_sub, generate=generate)
+            tri_num = anchor.shape[0]  # the number of triple
+            tri_num_batch = int(math.ceil(1.0 * anchor.shape[0] / batch_size))  # sub triple batches
 
             # train 1 epoch for triple loss
-            triplet_loss = 0.0
-            triplet_loss_val = 0.0
-            if epoch % update_interval == 0:
-                for tri_batch_idx in range(tri_num_batch):
-                    px1 = X[anchor[tri_batch_idx * batch_size: min(tri_num, (tri_batch_idx + 1) * batch_size)]]
-                    px2 = X[positive[tri_batch_idx * batch_size: min(tri_num, (tri_batch_idx + 1) * batch_size)]]
-                    px3 = X[negative[tri_batch_idx * batch_size: min(tri_num, (tri_batch_idx + 1) * batch_size)]]
-                    optimizer.zero_grad()
-                    inputs1 = Variable(px1).to(self.device)
-                    inputs2 = Variable(px2).to(self.device)
-                    inputs3 = Variable(px3).to(self.device)
-                    z1, q_t1, _, _, _ = self.forward(inputs1)
-                    z2, q_t2, _, _, _ = self.forward(inputs2)
-                    z3, q_t3, _, _, _ = self.forward(inputs3)
-                    loss = self.triplet_loss(q_t1, q_t2, q_t3, 0.1)
-                    triplet_loss += loss.data
-                    loss.backward()
-                    optimizer.step()
-                    triplet_loss_val += triplet_loss * len(inputs1)
-
-            # train 1 epoch for  weighted cross entropy loss
-            wce_loss=0.0
-            wce_loss_val = 0.0
-            labels = y
-            # torch.cuda.empty_cache()
-            for batch_idx in range(num_batch):
-                xbatch = X[batch_idx * batch_size: min((batch_idx + 1) * batch_size, num)]
-                ybatch=labels[batch_idx*batch_size : min((batch_idx+1)*batch_size, num)]
-                yratio=len(ybatch)/len(y)
-                ytensor = torch.as_tensor(ybatch, dtype=torch.long)  # torch
+            triplet_loss_val =0.0
+            for tri_batch_idx in range(tri_num_batch):
+                xt1 = X_sub[anchor[tri_batch_idx * batch_size: min(tri_num, (tri_batch_idx + 1) * batch_size)]]
+                xt2 = X_sub[positive[tri_batch_idx * batch_size: min(tri_num, (tri_batch_idx + 1) * batch_size)]]
+                xt3 = X_sub[negative[tri_batch_idx * batch_size: min(tri_num, (tri_batch_idx + 1) * batch_size)]]
                 optimizer.zero_grad()
-                inputs = Variable(xbatch).to(self.device)
-                y_true = Variable(ytensor).to(self.device)
-                _, q_w, _, _, _ = self.forward(inputs)
-                loss = self.weighted_cross_entropy_loss(y_true, q_w,yratio)
-                wce_loss+=loss.data
-                loss.requires_grad_(True)
-                loss.backward()
+                inputs1 = Variable(xt1).to(self.device)
+                inputs2 = Variable(xt2).to(self.device)
+                inputs3 = Variable(xt3).to(self.device)
+                _, q_t1, _, _, _ = self.forward(inputs1)
+                _, q_t2, _, _, _ = self.forward(inputs2)
+                _, q_t3, _, _, _ = self.forward(inputs3)
+                triplet_loss = self.triplet_loss(q_t1, q_t2, q_t3, margin)
+                loss2 = triplet_loss*self.gamma2
+                loss2.requires_grad_(True)
+                loss2.backward()
                 optimizer.step()
-                wce_loss_val += wce_loss* len(ybatch)
+                triplet_loss_val += triplet_loss * len(y_sub)
 
-            #train 1 epoch for pairwise contrastive loss
-            X_sub, y_sub = pairwise_select(X, y, 0.8)
-            yy = torch.as_tensor(y_sub, dtype=torch.float)
+            #train 1 epoch for pairwise contrastive loss , weighted cross entropy loss
+            yy = torch.as_tensor(y_sub, dtype=torch.long)
             optimizer.zero_grad()
-            inputss = Variable(X_sub).to(self.device)
-            _, q_c, _, _, _ = self.forward(inputss)
-            yy_prob = Variable(q_c).to('cpu')
-            yy_true = Variable(yy).to('cpu')
-            loss = self.pairwise_contrastive_loss(yy_true, yy_prob)
-            pwc_loss =loss.data
-            loss.requires_grad_(True)
-            loss.backward()
-            optimizer.step()
-            pwc_loss_val = pwc_loss.item() * len(y_sub)
+            yy_prob = Variable(p_sub).to(self.device)
+            yy_true = Variable(yy).to(self.device)
+            pwc_loss = self.pairwise_contrastive_loss(yy_true, yy_prob)
+            loss31 = pwc_loss * self.gamma3
+            loss31.requires_grad_(True)
 
-            print("Epoch%3d:\n\t\t Soft_Assign Loss: %.8f ZINB Loss: %.8f" % (
-                epoch + 1, cluster_loss_val / num, zinb_loss_val / num), end=' ')
+            wce_loss = self.weighted_cross_entropy_loss(yy_true, yy_prob ,1)
+            loss32 = wce_loss * self.gamma4
+            loss32.requires_grad_(True)
+            loss3 = loss31 + loss32
+            loss3.backward()
+            optimizer.step()
+            pwc_loss_val = pwc_loss * len(y_sub)
+            wce_loss_val = wce_loss * len(y_sub)
+
+            print("Epoch%3d:\n\t\tZINB Loss: %.5f DeepClustering Loss: %.5f " % (
+                epoch + 1 , zinb_loss_val / num , cluster_loss_val / num), end=' ')
             if tri_num_batch > 0:
-                print("Triplet Loss: %.8f" % (triplet_loss_val / num))
-            print("\t\tWeightedCrossEntropy Loss: %.8f PairwiseContrastive Loss: %.8f"
+                print("Triplet Loss: %.5f" % (triplet_loss_val / num))
+            print("\t\tWeightedCrossEntropy Loss: %.5f PairwiseContrastive Loss: %.5f"
                   % (wce_loss_val / num,pwc_loss_val/ num))
                   # % (wce_loss_val / num,0))
                   # % (0,pwc_loss_val/ num))
-            total_loss = cluster_loss_val * self.gamma + zinb_loss_val + triplet_loss_val*0.001\
-                         +pwc_loss_val*0.001+ wce_loss_val*0.001
-            print("\t\t***Total Loss: %.8f" % (total_loss / num))
-        return self.y_pred, final_acc, final_nmi, final_ari, final_epoch,final_ami
+            total_loss = zinb_loss_val + cluster_loss_val * self.gamma1 + triplet_loss_val * self.gamma2\
+                         + pwc_loss_val * self.gamma3 + wce_loss_val * self.gamma4
+            print("\t\t***Total Loss: %.5f" % (total_loss / num))
+        return self.y_pred, final_nmi, final_ari, final_acc, final_ami

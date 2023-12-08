@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import random
 import torch
@@ -21,7 +22,7 @@ def cluster_acc(y_true, y_pred):
 
 def generate_triplets(y, generate):
     stochastic = np.zeros_like(y)
-    idx = random.sample(range(y.shape[0]), 500)
+    idx = random.sample(range(y.shape[0]), len(y))
     stochastic[idx] = y[idx]
     anchor = []
     positive = []
@@ -40,15 +41,16 @@ def generate_triplets(y, generate):
             break
     return np.array(anchor), np.array(positive), np.array(negative).flatten()
 
-def pairwise_select(X,y,ratio):
+def cell_select(X,y,p,ratio):
     n=len(y)
     n_sub=int(n*ratio)
     mask=np.zeros(n,dtype=np.bool)
     indices=random.sample(range(n),n_sub)
     mask[indices]=True
-    y_sub=y[mask]
     X_sub=X[mask,:]
-    return X_sub,y_sub
+    y_sub = y[mask]
+    p_sub = p[mask,:]
+    return X_sub,y_sub,p_sub
 
 def adjust_labels(labels):
     unique_labels = np.unique(labels)  # Find all the different tags and sort them

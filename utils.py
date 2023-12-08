@@ -81,7 +81,6 @@ def encode_onehot(label, sort=False, ignore=None):
         ignore = []
     return onehot[:, ~np.in1d(c, ignore)].tocsr()
 
-
 class CellTypeDAG(object):
 
     def __init__(self, graph=None, vdict=None):
