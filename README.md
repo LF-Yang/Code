@@ -1,6 +1,6 @@
 Abstract
 =
-scTPC: a novel semi-supervised deep clustering model for scRNA-seq dat
+scTPC: a novel semi-supervised deep clustering model for scRNA-seq data
 
 Continuous advancements in single-cell RNA sequencing technology (scRNA-seq) have enabled researchers to further explore the study of cell heterogeneity, trajectory inference, identification of rare cell types, and neurology. Accurate scRNA-seq data clustering is crucial in single-cell sequencing data analysis. However, the high dimensionality, sparsity, and presence of ''false'' zero values in the data can pose challenges to clustering. Furthermore, current unsupervised clustering algorithms have not effectively leveraged prior biological knowledge, making cell clustering even more challenging.
 
