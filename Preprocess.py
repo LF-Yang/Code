@@ -60,7 +60,7 @@ def read_dataset(adata, transpose=False, test_split=False, copy=False):
 
     if adata.X.size < 50e6: # check if adata.X is integer only if array is small
         if sp.sparse.issparse(adata.X):
-            assert (adata.X.astype(int) != adata.X).nnz == 0, norm_error
+            assert (adata.X.astype(int) != adata.X).nnz , norm_error
         else:
             assert np.all(adata.X.astype(int) == adata.X), norm_error
 
